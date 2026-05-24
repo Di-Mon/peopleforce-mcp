@@ -2,7 +2,7 @@ services:
   peopleforce-mcp:
     build: .
     ports:
-      - "127.0.0.1:8001:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - PEOPLEFORCE_API_KEY=${PEOPLEFORCE_API_KEY}
       - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN}
