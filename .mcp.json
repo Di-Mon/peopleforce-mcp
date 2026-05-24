@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "peopleforce": {
+      "type": "http",
+      "url": "http://localhost:8001/mcp",
+      "headers": {
+        "Authorization": "Bearer 37818e9385f296d64bfb34e5712fe7c46cfea39e2586bdb57ab5539c8e2ec83e"
+      }
+    }
+  }
+}

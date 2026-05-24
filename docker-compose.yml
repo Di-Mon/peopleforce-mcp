@@ -1,0 +1,15 @@
+services:
+  peopleforce-mcp:
+    build: .
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      - PEOPLEFORCE_API_KEY=${PEOPLEFORCE_API_KEY}
+      - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
