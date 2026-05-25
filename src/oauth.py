@@ -1,51 +1,149 @@
+import base64
+import hashlib
 import hmac
 import json
 import os
 import secrets
 import time
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
-TOKEN_TTL = 3600  # seconds
+TOKEN_TTL = 3600      # seconds
+AUTH_CODE_TTL = 600   # 10 minutes
 
-# token -> expiry timestamp
-_store: dict[str, float] = {}
+# access token -> expiry
+_tokens: dict[str, float] = {}
 
+# auth code -> {code_challenge, code_challenge_method, redirect_uri, expires}
+_auth_codes: dict[str, dict] = {}
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _cleanup() -> None:
     now = time.time()
-    expired = [t for t, exp in list(_store.items()) if exp < now]
-    for t in expired:
-        _store.pop(t, None)
+    for store in (_tokens, _auth_codes):
+        expired = [k for k, v in list(store.items()) if (v if isinstance(v, float) else v["expires"]) < now]
+        for k in expired:
+            store.pop(k, None)
 
 
-def _issue_token() -> tuple[str, int]:
+def _issue_access_token() -> tuple[str, int]:
     _cleanup()
     token = secrets.token_hex(32)
-    _store[token] = time.time() + TOKEN_TTL
+    _tokens[token] = time.time() + TOKEN_TTL
     return token, TOKEN_TTL
 
 
+def _issue_auth_code(code_challenge: str, code_challenge_method: str, redirect_uri: str) -> str:
+    code = secrets.token_urlsafe(32)
+    _auth_codes[code] = {
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
+        "redirect_uri": redirect_uri,
+        "expires": time.time() + AUTH_CODE_TTL,
+    }
+    return code
+
+
+def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
+    if method == "S256":
+        digest = hashlib.sha256(code_verifier.encode()).digest()
+        computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        return hmac.compare_digest(computed, code_challenge)
+    if method == "plain":
+        return hmac.compare_digest(code_verifier, code_challenge)
+    return False
+
+
 def is_valid_oauth_token(token: str) -> bool:
-    exp = _store.get(token)
+    exp = _tokens.get(token)
     if exp is None:
         return False
     if time.time() > exp:
-        _store.pop(token, None)
+        _tokens.pop(token, None)
         return False
     return True
 
 
-async def handle_token_request(body: bytes, send) -> None:
-    """POST /oauth/token — client credentials flow."""
-    params = parse_qs(body.decode(errors="replace"))
+# ---------------------------------------------------------------------------
+# ASGI endpoint handlers (called from _OAuthMiddleware, bypass auth)
+# ---------------------------------------------------------------------------
 
+async def handle_authorize_request(scope: dict, send) -> None:
+    """GET /authorize — validate client, issue auth code, redirect back."""
+    query = parse_qs(scope.get("query_string", b"").decode())
+
+    client_id = query.get("client_id", [""])[0]
+    redirect_uri = query.get("redirect_uri", [""])[0]
+    state = query.get("state", [""])[0]
+    code_challenge = query.get("code_challenge", [""])[0]
+    code_challenge_method = query.get("code_challenge_method", ["S256"])[0]
+
+    expected_id = os.environ.get("OAUTH_CLIENT_ID", "")
+    if not expected_id or not hmac.compare_digest(client_id.encode(), expected_id.encode()):
+        await _json(send, 401, {"error": "invalid_client"})
+        return
+
+    if not redirect_uri or not code_challenge:
+        await _json(send, 400, {"error": "invalid_request", "error_description": "redirect_uri and code_challenge required"})
+        return
+
+    code = _issue_auth_code(code_challenge, code_challenge_method, redirect_uri)
+
+    params: dict = {"code": code}
+    if state:
+        params["state"] = state
+    sep = "&" if "?" in redirect_uri else "?"
+    location = redirect_uri + sep + urlencode(params)
+
+    await send({"type": "http.response.start", "status": 302, "headers": [(b"location", location.encode()), (b"content-length", b"0")]})
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def handle_token_request(body: bytes, send) -> None:
+    """POST /oauth/token — authorization_code or client_credentials."""
+    params = parse_qs(body.decode(errors="replace"))
     grant_type = params.get("grant_type", [""])[0]
+
+    if grant_type == "authorization_code":
+        await _authorization_code(params, send)
+    elif grant_type == "client_credentials":
+        await _client_credentials(params, send)
+    else:
+        await _json(send, 400, {"error": "unsupported_grant_type"})
+
+
+async def _authorization_code(params: dict, send) -> None:
+    code = params.get("code", [""])[0]
+    code_verifier = params.get("code_verifier", [""])[0]
+    redirect_uri = params.get("redirect_uri", [""])[0]
+
+    entry = _auth_codes.pop(code, None)
+    if not entry:
+        await _json(send, 400, {"error": "invalid_grant", "error_description": "Unknown or expired code"})
+        return
+
+    if time.time() > entry["expires"]:
+        await _json(send, 400, {"error": "invalid_grant", "error_description": "Code expired"})
+        return
+
+    if entry["redirect_uri"] != redirect_uri:
+        await _json(send, 400, {"error": "invalid_grant", "error_description": "redirect_uri mismatch"})
+        return
+
+    if not _verify_pkce(code_verifier, entry["code_challenge"], entry["code_challenge_method"]):
+        await _json(send, 400, {"error": "invalid_grant", "error_description": "PKCE verification failed"})
+        return
+
+    token, ttl = _issue_access_token()
+    await _json(send, 200, {"access_token": token, "token_type": "Bearer", "expires_in": ttl})
+
+
+async def _client_credentials(params: dict, send) -> None:
     client_id = params.get("client_id", [""])[0]
     client_secret = params.get("client_secret", [""])[0]
-
-    if grant_type != "client_credentials":
-        await _json(send, 400, {"error": "unsupported_grant_type"})
-        return
 
     expected_id = os.environ.get("OAUTH_CLIENT_ID", "")
     expected_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
@@ -56,12 +154,11 @@ async def handle_token_request(body: bytes, send) -> None:
 
     id_ok = hmac.compare_digest(client_id.encode(), expected_id.encode())
     secret_ok = hmac.compare_digest(client_secret.encode(), expected_secret.encode())
-
     if not (id_ok and secret_ok):
         await _json(send, 401, {"error": "invalid_client"})
         return
 
-    token, ttl = _issue_token()
+    token, ttl = _issue_access_token()
     await _json(send, 200, {"access_token": token, "token_type": "Bearer", "expires_in": ttl})
 
 
@@ -70,9 +167,6 @@ async def _json(send, status: int, data: dict) -> None:
     await send({
         "type": "http.response.start",
         "status": status,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-        ],
+        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
     })
     await send({"type": "http.response.body", "body": body})

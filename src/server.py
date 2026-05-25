@@ -1070,16 +1070,26 @@ class _OAuthMiddleware:
         self._app = asgi_app
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope.get("type") == "http" and scope.get("path") == "/oauth/token" and scope.get("method") == "POST":
-            body = b""
-            while True:
-                msg = await receive()
-                body += msg.get("body", b"")
-                if not msg.get("more_body", False):
-                    break
-            from oauth import handle_token_request
-            await handle_token_request(body, send)
-            return
+        if scope.get("type") == "http":
+            path = scope.get("path", "")
+            method = scope.get("method", "")
+
+            if path == "/authorize" and method == "GET":
+                from oauth import handle_authorize_request
+                await handle_authorize_request(scope, send)
+                return
+
+            if path == "/oauth/token" and method == "POST":
+                body = b""
+                while True:
+                    msg = await receive()
+                    body += msg.get("body", b"")
+                    if not msg.get("more_body", False):
+                        break
+                from oauth import handle_token_request
+                await handle_token_request(body, send)
+                return
+
         await self._app(scope, receive, send)
 
 
