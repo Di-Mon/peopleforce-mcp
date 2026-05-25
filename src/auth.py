@@ -18,11 +18,12 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"error": "MCP_SECRET_TOKEN not configured"}, status_code=500)
 
         auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return JSONResponse({"error": "Missing or invalid Authorization header"}, status_code=401)
+        if auth_header.startswith("Bearer "):
+            token = auth_header[len("Bearer "):]
+        else:
+            token = request.query_params.get("token", "")
 
-        token = auth_header[len("Bearer "):]
-        if not hmac.compare_digest(token.encode(), expected.encode()):
+        if not token or not hmac.compare_digest(token.encode(), expected.encode()):
             return JSONResponse({"error": "Invalid token"}, status_code=401)
 
         return await call_next(request)
