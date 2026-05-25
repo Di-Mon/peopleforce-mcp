@@ -5,17 +5,15 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from oauth import is_valid_oauth_token
+
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Validates Authorization: Bearer <token> on every request except /health."""
+    """Accepts: static MCP_SECRET_TOKEN (header or ?token=) or OAuth-issued tokens."""
 
     async def dispatch(self, request: Request, call_next):
         if request.url.path == "/health":
             return await call_next(request)
-
-        expected = os.environ.get("MCP_SECRET_TOKEN", "")
-        if not expected:
-            return JSONResponse({"error": "MCP_SECRET_TOKEN not configured"}, status_code=500)
 
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
@@ -23,7 +21,14 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         else:
             token = request.query_params.get("token", "")
 
-        if not token or not hmac.compare_digest(token.encode(), expected.encode()):
-            return JSONResponse({"error": "Invalid token"}, status_code=401)
+        if not token:
+            return JSONResponse({"error": "Missing Authorization"}, status_code=401)
 
-        return await call_next(request)
+        static = os.environ.get("MCP_SECRET_TOKEN", "")
+        if static and hmac.compare_digest(token.encode(), static.encode()):
+            return await call_next(request)
+
+        if is_valid_oauth_token(token):
+            return await call_next(request)
+
+        return JSONResponse({"error": "Invalid token"}, status_code=401)

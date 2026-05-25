@@ -1042,8 +1042,8 @@ async def get_document_folder(folder_id: str) -> Any:
 # ==============================================================================
 # ASGI app assembly
 # ==============================================================================
-# Stack: BearerAuthMiddleware → _HealthMiddleware → mcp_asgi
-# BearerAuthMiddleware passes /health unauthenticated.
+# Stack: _OAuthMiddleware → BearerAuthMiddleware → _HealthMiddleware → mcp_asgi
+# _OAuthMiddleware intercepts POST /oauth/token before auth is checked.
 # _HealthMiddleware short-circuits /health before MCP routing.
 
 
@@ -1065,5 +1065,23 @@ class _HealthMiddleware:
         await self._app(scope, receive, send)
 
 
+class _OAuthMiddleware:
+    def __init__(self, asgi_app: Any) -> None:
+        self._app = asgi_app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("path") == "/oauth/token" and scope.get("method") == "POST":
+            body = b""
+            while True:
+                msg = await receive()
+                body += msg.get("body", b"")
+                if not msg.get("more_body", False):
+                    break
+            from oauth import handle_token_request
+            await handle_token_request(body, send)
+            return
+        await self._app(scope, receive, send)
+
+
 _mcp_asgi = mcp.streamable_http_app()
-app = BearerAuthMiddleware(_HealthMiddleware(_mcp_asgi))
+app = _OAuthMiddleware(BearerAuthMiddleware(_HealthMiddleware(_mcp_asgi)))

@@ -6,6 +6,8 @@ services:
     environment:
       - PEOPLEFORCE_API_KEY=${PEOPLEFORCE_API_KEY}
       - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
