@@ -57,6 +57,12 @@ def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
     return False
 
 
+def _issuer(scope: dict) -> str:
+    headers = dict(scope.get("headers", []))
+    host = headers.get(b"host", b"localhost").decode()
+    return f"https://{host}"
+
+
 def is_valid_oauth_token(token: str) -> bool:
     exp = _tokens.get(token)
     if exp is None:
@@ -68,11 +74,33 @@ def is_valid_oauth_token(token: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# ASGI endpoint handlers (called from _OAuthMiddleware, bypass auth)
+# ASGI endpoint handlers (all called before auth middleware)
 # ---------------------------------------------------------------------------
 
+async def handle_authorization_server_metadata(scope: dict, send) -> None:
+    """GET /.well-known/oauth-authorization-server — RFC 8414 discovery."""
+    base = _issuer(scope)
+    await _json(send, 200, {
+        "issuer": base,
+        "authorization_endpoint": f"{base}/authorize",
+        "token_endpoint": f"{base}/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "client_credentials"],
+        "code_challenge_methods_supported": ["S256"],
+    })
+
+
+async def handle_protected_resource_metadata(scope: dict, send) -> None:
+    """GET /.well-known/oauth-protected-resource[/*] — RFC 9728 discovery."""
+    base = _issuer(scope)
+    await _json(send, 200, {
+        "resource": base,
+        "authorization_servers": [base],
+    })
+
+
 async def handle_authorize_request(scope: dict, send) -> None:
-    """GET /authorize — validate client, issue auth code, redirect back."""
+    """GET /authorize — issue auth code and redirect back with PKCE."""
     query = parse_qs(scope.get("query_string", b"").decode())
 
     client_id = query.get("client_id", [""])[0]
@@ -103,7 +131,7 @@ async def handle_authorize_request(scope: dict, send) -> None:
 
 
 async def handle_token_request(body: bytes, send) -> None:
-    """POST /oauth/token — authorization_code or client_credentials."""
+    """POST /token — authorization_code or client_credentials."""
     params = parse_qs(body.decode(errors="replace"))
     grant_type = params.get("grant_type", [""])[0]
 

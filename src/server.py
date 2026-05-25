@@ -1066,6 +1066,12 @@ class _HealthMiddleware:
 
 
 class _OAuthMiddleware:
+    _DISCOVERY_PATHS = {
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+    }
+
     def __init__(self, asgi_app: Any) -> None:
         self._app = asgi_app
 
@@ -1074,12 +1080,20 @@ class _OAuthMiddleware:
             path = scope.get("path", "")
             method = scope.get("method", "")
 
+            if path in self._DISCOVERY_PATHS and method == "GET":
+                from oauth import handle_authorization_server_metadata, handle_protected_resource_metadata
+                if "authorization-server" in path:
+                    await handle_authorization_server_metadata(scope, send)
+                else:
+                    await handle_protected_resource_metadata(scope, send)
+                return
+
             if path == "/authorize" and method == "GET":
                 from oauth import handle_authorize_request
                 await handle_authorize_request(scope, send)
                 return
 
-            if path == "/oauth/token" and method == "POST":
+            if path == "/token" and method == "POST":
                 body = b""
                 while True:
                     msg = await receive()
