@@ -5,6 +5,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -24,7 +25,11 @@ async def lifespan(app: Any) -> AsyncIterator[dict[str, Any]]:
         await client.close()
 
 
-mcp = FastMCP("peopleforce", lifespan=lifespan)
+mcp = FastMCP(
+    "peopleforce",
+    lifespan=lifespan,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def _pf() -> PeopleForceClient:
@@ -1107,18 +1112,5 @@ class _OAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-class _HostRewriteMiddleware:
-    """Rewrites Host header to localhost so FastMCP's host validation passes."""
-
-    def __init__(self, asgi_app: Any) -> None:
-        self._app = asgi_app
-
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope.get("type") == "http":
-            headers = [(k, b"localhost" if k == b"host" else v) for k, v in scope.get("headers", [])]
-            scope = {**scope, "headers": headers}
-        await self._app(scope, receive, send)
-
-
 _mcp_asgi = mcp.streamable_http_app()
-app = _OAuthMiddleware(BearerAuthMiddleware(_HealthMiddleware(_HostRewriteMiddleware(_mcp_asgi))))
+app = _OAuthMiddleware(BearerAuthMiddleware(_HealthMiddleware(_mcp_asgi)))
