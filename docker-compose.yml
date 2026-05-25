@@ -1,13 +1,14 @@
 services:
   peopleforce-mcp:
     build: .
-    ports:
-      - "127.0.0.1:8000:8000"
     environment:
       - PEOPLEFORCE_API_KEY=${PEOPLEFORCE_API_KEY}
       - MCP_SECRET_TOKEN=${MCP_SECRET_TOKEN}
       - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID}
       - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}
+      - VIRTUAL_HOST=pfmcp.barbamarin.com
+      - LETSENCRYPT_HOST=pfmcp.barbamarin.com
+      - VIRTUAL_PORT=8000
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -15,3 +16,9 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - nginx-network
+      - default
+networks:
+  nginx-network:
+    external: true
