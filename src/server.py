@@ -1107,5 +1107,18 @@ class _OAuthMiddleware:
         await self._app(scope, receive, send)
 
 
+class _HostRewriteMiddleware:
+    """Rewrites Host header to localhost so FastMCP's host validation passes."""
+
+    def __init__(self, asgi_app: Any) -> None:
+        self._app = asgi_app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            headers = [(k, b"localhost" if k == b"host" else v) for k, v in scope.get("headers", [])]
+            scope = {**scope, "headers": headers}
+        await self._app(scope, receive, send)
+
+
 _mcp_asgi = mcp.streamable_http_app()
-app = _OAuthMiddleware(BearerAuthMiddleware(_HealthMiddleware(_mcp_asgi)))
+app = _OAuthMiddleware(BearerAuthMiddleware(_HealthMiddleware(_HostRewriteMiddleware(_mcp_asgi))))
