@@ -7,11 +7,15 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlencode
 
-TOKEN_TTL = 3600      # seconds
-AUTH_CODE_TTL = 600   # 10 minutes
+TOKEN_TTL = 3600               # 1 hour
+REFRESH_TOKEN_TTL = 30 * 86400 # 30 days
+AUTH_CODE_TTL = 600            # 10 minutes
 
 # access token -> expiry
 _tokens: dict[str, float] = {}
+
+# refresh token -> expiry
+_refresh_tokens: dict[str, float] = {}
 
 # auth code -> {code_challenge, code_challenge_method, redirect_uri, expires}
 _auth_codes: dict[str, dict] = {}
@@ -23,17 +27,23 @@ _auth_codes: dict[str, dict] = {}
 
 def _cleanup() -> None:
     now = time.time()
-    for store in (_tokens, _auth_codes):
-        expired = [k for k, v in list(store.items()) if (v if isinstance(v, float) else v["expires"]) < now]
+    for store in (_tokens, _refresh_tokens):
+        expired = [k for k, v in list(store.items()) if v < now]
         for k in expired:
             store.pop(k, None)
+    expired_codes = [k for k, v in list(_auth_codes.items()) if v["expires"] < now]
+    for k in expired_codes:
+        _auth_codes.pop(k, None)
 
 
-def _issue_access_token() -> tuple[str, int]:
+def _issue_tokens() -> tuple[str, str, int]:
+    """Issue an access token + refresh token pair."""
     _cleanup()
-    token = secrets.token_hex(32)
-    _tokens[token] = time.time() + TOKEN_TTL
-    return token, TOKEN_TTL
+    access_token = secrets.token_hex(32)
+    refresh_token = secrets.token_hex(32)
+    _tokens[access_token] = time.time() + TOKEN_TTL
+    _refresh_tokens[refresh_token] = time.time() + REFRESH_TOKEN_TTL
+    return access_token, refresh_token, TOKEN_TTL
 
 
 def _issue_auth_code(code_challenge: str, code_challenge_method: str, redirect_uri: str) -> str:
@@ -73,6 +83,15 @@ def is_valid_oauth_token(token: str) -> bool:
     return True
 
 
+def _token_response(access_token: str, refresh_token: str, ttl: int) -> dict:
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": ttl,
+        "refresh_token": refresh_token,
+    }
+
+
 # ---------------------------------------------------------------------------
 # ASGI endpoint handlers (all called before auth middleware)
 # ---------------------------------------------------------------------------
@@ -85,7 +104,7 @@ async def handle_authorization_server_metadata(scope: dict, send) -> None:
         "authorization_endpoint": f"{base}/authorize",
         "token_endpoint": f"{base}/token",
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "client_credentials"],
+        "grant_types_supported": ["authorization_code", "client_credentials", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
     })
 
@@ -131,12 +150,14 @@ async def handle_authorize_request(scope: dict, send) -> None:
 
 
 async def handle_token_request(body: bytes, send) -> None:
-    """POST /token — authorization_code or client_credentials."""
+    """POST /token — authorization_code, refresh_token, or client_credentials."""
     params = parse_qs(body.decode(errors="replace"))
     grant_type = params.get("grant_type", [""])[0]
 
     if grant_type == "authorization_code":
         await _authorization_code(params, send)
+    elif grant_type == "refresh_token":
+        await _refresh_token(params, send)
     elif grant_type == "client_credentials":
         await _client_credentials(params, send)
     else:
@@ -165,8 +186,21 @@ async def _authorization_code(params: dict, send) -> None:
         await _json(send, 400, {"error": "invalid_grant", "error_description": "PKCE verification failed"})
         return
 
-    token, ttl = _issue_access_token()
-    await _json(send, 200, {"access_token": token, "token_type": "Bearer", "expires_in": ttl})
+    access_token, refresh_token, ttl = _issue_tokens()
+    await _json(send, 200, _token_response(access_token, refresh_token, ttl))
+
+
+async def _refresh_token(params: dict, send) -> None:
+    token = params.get("refresh_token", [""])[0]
+
+    exp = _refresh_tokens.pop(token, None)
+    if not exp or time.time() > exp:
+        await _json(send, 400, {"error": "invalid_grant", "error_description": "Refresh token expired or invalid"})
+        return
+
+    # Rotate: issue a new pair
+    access_token, new_refresh_token, ttl = _issue_tokens()
+    await _json(send, 200, _token_response(access_token, new_refresh_token, ttl))
 
 
 async def _client_credentials(params: dict, send) -> None:
@@ -186,8 +220,8 @@ async def _client_credentials(params: dict, send) -> None:
         await _json(send, 401, {"error": "invalid_client"})
         return
 
-    token, ttl = _issue_access_token()
-    await _json(send, 200, {"access_token": token, "token_type": "Bearer", "expires_in": ttl})
+    access_token, refresh_token, ttl = _issue_tokens()
+    await _json(send, 200, _token_response(access_token, refresh_token, ttl))
 
 
 async def _json(send, status: int, data: dict) -> None:
